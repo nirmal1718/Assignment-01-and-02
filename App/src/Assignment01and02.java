@@ -1,86 +1,103 @@
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
-import java.time.Instant;
+import java.util.*;
 
-public class assignment01and02 {
+class TrieNode {
+    // Map character to child node for space efficiency
+    Map<Character, TrieNode> children = new HashMap<>();
 
-    private final Map<String, TokenBucket> clientBuckets = new ConcurrentHashMap<>();
-    private static final long MAX_LIMIT = 1000;
-    private static final long REFILL_INTERVAL_SEC = 3600; // 1 hour
+    // Pre-computed top 10 queries passing through this node
+    // Using a list of a custom inner class for ranking
+    List<QueryInfo> topTen = new ArrayList<>();
+}
+
+class QueryInfo implements Comparable<QueryInfo> {
+    String query;
+    int frequency;
+
+    QueryInfo(String query, int frequency) {
+        this.query = query;
+        this.frequency = frequency;
+    }
+
+    @Override
+    public int compareTo(QueryInfo other) {
+        // Sort by frequency descending, then alphabetically ascending
+        if (this.frequency != other.frequency) {
+            return Integer.compare(other.frequency, this.frequency);
+        }
+        return this.query.compareTo(other.query);
+    }
+}
+
+public class Assignment01and02 {
+    private final TrieNode root;
+    private final Map<String, Integer> globalFreq;
+
+    public AutocompleteSystem() {
+        this.root = new TrieNode();
+        this.globalFreq = new HashMap<>();
+    }
 
     /**
-     * Internal class representing a client's bucket state.
-     * Uses atomic operations to ensure thread safety under high concurrency.
+     * Updates the frequency of a query and refreshes the Trie path.
+     * Time Complexity: O(L * K log K) where L is query length and K is 10.
      */
-    class TokenBucket {
-        final long capacity;
-        final AtomicLong tokens;
-        final AtomicLong lastRefillTimestamp;
+    public void updateFrequency(String query, int delta) {
+        int newFreq = globalFreq.getOrDefault(query, 0) + delta;
+        globalFreq.put(query, newFreq);
 
-        TokenBucket(long capacity) {
-            this.capacity = capacity;
-            this.tokens = new AtomicLong(capacity);
-            this.lastRefillTimestamp = new AtomicLong(Instant.now().getEpochSecond());
+        TrieNode curr = root;
+        for (char c : query.toCharArray()) {
+            curr.children.putIfAbsent(c, new TrieNode());
+            curr = curr.children.get(c);
+            updateTopTen(curr, query, newFreq);
         }
+    }
 
-        public synchronized boolean tryConsume() {
-            refill();
-            if (tokens.get() > 0) {
-                tokens.decrementAndGet();
-                return true;
-            }
-            return false;
-        }
+    private void updateTopTen(TrieNode node, String query, int freq) {
+        // Remove the query if it already exists in the top ten (to update its freq)
+        node.topTen.removeIf(info -> info.query.equals(query));
 
-        private void refill() {
-            long now = Instant.now().getEpochSecond();
-            long lastRefill = lastRefillTimestamp.get();
+        // Add the updated info
+        node.topTen.add(new QueryInfo(query, freq));
 
-            if (now > lastRefill) {
-                // If the reset interval (1 hour) has passed, reset tokens to full
-                if (now - lastRefill >= REFILL_INTERVAL_SEC) {
-                    tokens.set(capacity);
-                    lastRefillTimestamp.set(now);
-                }
-            }
+        // Sort and prune to keep only Top 10
+        Collections.sort(node.topTen);
+        if (node.topTen.size() > 10) {
+            node.topTen.remove(node.topTen.size() - 1);
         }
     }
 
     /**
-     * Primary check for API access
+     * Returns top 10 suggestions for a prefix.
+     * Time Complexity: O(L) where L is prefix length.
      */
-    public String checkRateLimit(String clientId) {
-        TokenBucket bucket = clientBuckets.computeIfAbsent(clientId, k -> new TokenBucket(MAX_LIMIT));
-
-        if (bucket.tryConsume()) {
-            return String.format("Allowed (%d requests remaining)", bucket.tokens.get());
-        } else {
-            long nextReset = bucket.lastRefillTimestamp.get() + REFILL_INTERVAL_SEC;
-            long retryAfter = nextReset - Instant.now().getEpochSecond();
-            return String.format("Denied (0 requests remaining, retry after %ds)", Math.max(0, retryAfter));
+    public List<String> search(String prefix) {
+        TrieNode curr = root;
+        for (char c : prefix.toCharArray()) {
+            if (!curr.children.containsKey(c)) {
+                return Collections.emptyList();
+            }
+            curr = curr.children.get(c);
         }
-    }
 
-    /**
-     * Returns the current status of a client's limit
-     */
-    public String getRateLimitStatus(String clientId) {
-        TokenBucket bucket = clientBuckets.get(clientId);
-        if (bucket == null) return "Client not initialized.";
-
-        long used = MAX_LIMIT - bucket.tokens.get();
-        long resetAt = bucket.lastRefillTimestamp.get() + REFILL_INTERVAL_SEC;
-
-        return String.format("{used: %d, limit: %d, reset: %d}", used, MAX_LIMIT, resetAt);
+        List<String> results = new ArrayList<>();
+        for (QueryInfo info : curr.topTen) {
+            results.add(info.query);
+        }
+        return results;
     }
 
     public static void main(String[] args) {
-        RateLimiterManager limiter = new RateLimiterManager();
+        Assignment01and02 ac = new AutocompleteSystem();
 
-        // Example Usage
-        System.out.println(limiter.checkRateLimit("abc123")); // Allowed (999 remaining)
-        System.out.println(limiter.checkRateLimit("abc123")); // Allowed (998 remaining)
-        System.out.println(limiter.getRateLimitStatus("abc123"));
+        ac.updateFrequency("java tutorial", 1234567);
+        ac.updateFrequency("javascript", 987654);
+        ac.updateFrequency("java download", 456789);
+
+        System.out.println("Search 'jav': " + ac.search("jav"));
+
+        // Trending update
+        ac.updateFrequency("java 21 features", 2000000);
+        System.out.println("Search 'jav' after trend: " + ac.search("jav"));
     }
 }
