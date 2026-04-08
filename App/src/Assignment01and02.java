@@ -1,79 +1,133 @@
+import java.util.*;
 import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.locks.ReentrantLock;
+
+class DNSEntry {
+    String domain;
+    String ipAddress;
+    long expiryTime; // System.currentTimeMillis() + TTL
+
+    DNSEntry(String domain, String ipAddress, long ttlSeconds) {
+        this.domain = domain;
+        this.ipAddress = ipAddress;
+        this.expiryTime = System.currentTimeMillis() + (ttlSeconds * 1000);
+    }
+
+    boolean isExpired() {
+        return System.currentTimeMillis() > expiryTime;
+    }
+}
 
 public class Assignment01and02 {
-    // Stores Product ID -> Current Stock
-    private final ConcurrentHashMap<String, AtomicInteger> inventory = new ConcurrentHashMap<>();
+    private final int capacity;
+    private final Map<String, DNSEntry> cache;
+    private final LinkedList<String> lruOrder;
+    private final ReentrantLock lock = new ReentrantLock();
 
-    // Stores Product ID -> Queue of User IDs (FIFO Waiting List)
-    private final ConcurrentHashMap<String, ConcurrentLinkedQueue<Long>> waitingLists = new ConcurrentHashMap<>();
+    // Metrics
+    private long hits = 0;
+    private long misses = 0;
+    private long totalLookupTimeNs = 0;
 
-    /**
-     * Initializes a product in the system.
-     */
-    public void addProduct(String productId, int initialStock) {
-        inventory.put(productId, new AtomicInteger(initialStock));
-        waitingLists.put(productId, new ConcurrentLinkedQueue<>());
+    public DNSCache(int capacity) {
+        this.capacity = capacity;
+        this.cache = new HashMap<>();
+        this.lruOrder = new LinkedList<>();
+
+        // Background thread to clean expired entries every 10 seconds
+        ScheduledExecutorService cleaner = Executors.newSingleThreadScheduledExecutor();
+        cleaner.scheduleAtFixedRate(this::cleanupExpired, 10, 10, TimeUnit.SECONDS);
     }
 
-    /**
-     * Checks current stock in O(1)
-     */
-    public int checkStock(String productId) {
-        AtomicInteger stock = inventory.get(productId);
-        return (stock != null) ? stock.get() : 0;
-    }
+    public String resolve(String domain) {
+        long startTime = System.nanoTime();
+        lock.lock();
+        try {
+            if (cache.containsKey(domain)) {
+                DNSEntry entry = cache.get(domain);
 
-    /**
-     * Processes purchase with atomic operations to prevent overselling.
-     */
-    public String purchaseItem(String productId, long userId) {
-        AtomicInteger stock = inventory.get(productId);
-
-        if (stock == null) return "Product not found.";
-
-        // Atomic decrement and get: equivalent to check-and-set in one CPU cycle
-        // We only proceed if the value was > 0 before decrementing
-        while (true) {
-            int currentStock = stock.get();
-            if (currentStock <= 0) {
-                addToWaitingList(productId, userId);
-                int position = getWaitingListPosition(productId, userId);
-                return "Added to waiting list, position #" + position;
+                if (!entry.isExpired()) {
+                    // Cache HIT
+                    hits++;
+                    updateLRU(domain);
+                    recordTime(startTime);
+                    System.out.println("resolve(\"" + domain + "\") -> Cache HIT -> " + entry.ipAddress);
+                    return entry.ipAddress;
+                } else {
+                    // Cache EXPIRED
+                    System.out.print("resolve(\"" + domain + "\") -> Cache EXPIRED -> ");
+                    removeEntry(domain);
+                }
+            } else {
+                // Cache MISS
+                System.out.print("resolve(\"" + domain + "\") -> Cache MISS -> ");
             }
 
-            // compareAndSet ensures no other thread changed the stock between our get() and set()
-            if (stock.compareAndSet(currentStock, currentStock - 1)) {
-                return "Success, " + (currentStock - 1) + " units remaining";
-            }
+            // Simulate Upstream Query (100ms delay)
+            misses++;
+            String ip = queryUpstream(domain);
+            put(domain, ip, 300); // Default 300s TTL
+            recordTime(startTime);
+            System.out.println("Query upstream -> " + ip);
+            return ip;
+
+        } finally {
+            lock.unlock();
         }
     }
 
-    private void addToWaitingList(String productId, long userId) {
-        ConcurrentLinkedQueue<Long> queue = waitingLists.get(productId);
-        if (!queue.contains(userId)) {
-            queue.add(userId);
+    private void put(String domain, String ip, long ttl) {
+        if (cache.size() >= capacity) {
+            String oldest = lruOrder.removeLast();
+            cache.remove(oldest);
+        }
+        DNSEntry newEntry = new DNSEntry(domain, ip, ttl);
+        cache.put(domain, newEntry);
+        lruOrder.addFirst(domain);
+    }
+
+    private void updateLRU(String domain) {
+        lruOrder.remove(domain);
+        lruOrder.addFirst(domain);
+    }
+
+    private void removeEntry(String domain) {
+        cache.remove(domain);
+        lruOrder.remove(domain);
+    }
+
+    private String queryUpstream(String domain) {
+        // Mock upstream DNS resolution
+        try { Thread.sleep(100); } catch (InterruptedException e) {}
+        return "172.217.14." + (new Random().nextInt(255));
+    }
+
+    private void recordTime(long startNs) {
+        totalLookupTimeNs += (System.nanoTime() - startNs);
+    }
+
+    public void cleanupExpired() {
+        lock.lock();
+        try {
+            cache.entrySet().removeIf(entry -> entry.getValue().isExpired());
+            lruOrder.removeIf(domain -> !cache.containsKey(domain));
+        } finally {
+            lock.unlock();
         }
     }
 
-    private int getWaitingListPosition(String productId, long userId) {
-        ConcurrentLinkedQueue<Long> queue = waitingLists.get(productId);
-        int pos = 1;
-        for (Long id : queue) {
-            if (id == userId) return pos;
-            pos++;
-        }
-        return pos;
+    public void getCacheStats() {
+        double hitRate = (hits + misses == 0) ? 0 : (double) hits / (hits + misses) * 100;
+        double avgTimeMs = (hits + misses == 0) ? 0 : (totalLookupTimeNs / 1_000_000.0) / (hits + misses);
+        System.out.printf("Stats -> Hit Rate: %.1f%%, Avg Lookup Time: %.2fms%n", hitRate, avgTimeMs);
     }
 
-    public static void main(String[] args) {
-        FlashSaleManager manager = new FlashSaleManager();
-        String product = "IPHONE15_256GB";
-        manager.addProduct(product, 2); // Small stock for demo
+    public static void main(String[] args) throws InterruptedException {
+        DNSCache dns = new DNSCache(5);
 
-        System.out.println(manager.purchaseItem(product, 12345)); // Success
-        System.out.println(manager.purchaseItem(product, 67890)); // Success
-        System.out.println(manager.purchaseItem(product, 99999)); // Waiting List
+        dns.resolve("google.com"); // Miss
+        dns.resolve("google.com"); // Hit
+        dns.resolve("openai.com"); // Miss
+        dns.getCacheStats();
     }
 }
