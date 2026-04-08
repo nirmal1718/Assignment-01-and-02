@@ -1,103 +1,126 @@
 import java.util.*;
+import java.time.*;
 
-class TrieNode {
-    // Map character to child node for space efficiency
-    Map<Character, TrieNode> children = new HashMap<>();
+enum SpotStatus { EMPTY, OCCUPIED, DELETED }
 
-    // Pre-computed top 10 queries passing through this node
-    // Using a list of a custom inner class for ranking
-    List<QueryInfo> topTen = new ArrayList<>();
-}
+class Vehicle {
+    String licensePlate;
+    LocalDateTime entryTime;
 
-class QueryInfo implements Comparable<QueryInfo> {
-    String query;
-    int frequency;
-
-    QueryInfo(String query, int frequency) {
-        this.query = query;
-        this.frequency = frequency;
-    }
-
-    @Override
-    public int compareTo(QueryInfo other) {
-        // Sort by frequency descending, then alphabetically ascending
-        if (this.frequency != other.frequency) {
-            return Integer.compare(other.frequency, this.frequency);
-        }
-        return this.query.compareTo(other.query);
+    Vehicle(String licensePlate) {
+        this.licensePlate = licensePlate;
+        this.entryTime = LocalDateTime.now();
     }
 }
 
-public class Assignment01and02 {
-    private final TrieNode root;
-    private final Map<String, Integer> globalFreq;
+class ParkingSpot {
+    Vehicle vehicle;
+    SpotStatus status = SpotStatus.EMPTY;
+}
 
-    public AutocompleteSystem() {
-        this.root = new TrieNode();
-        this.globalFreq = new HashMap<>();
-    }
+public class ParkingLotSystem {
+    private final int capacity;
+    private final ParkingSpot[] lot;
+    private int occupiedCount = 0;
+    private int totalProbes = 0;
+    private int totalParkings = 0;
 
-    /**
-     * Updates the frequency of a query and refreshes the Trie path.
-     * Time Complexity: O(L * K log K) where L is query length and K is 10.
-     */
-    public void updateFrequency(String query, int delta) {
-        int newFreq = globalFreq.getOrDefault(query, 0) + delta;
-        globalFreq.put(query, newFreq);
-
-        TrieNode curr = root;
-        for (char c : query.toCharArray()) {
-            curr.children.putIfAbsent(c, new TrieNode());
-            curr = curr.children.get(c);
-            updateTopTen(curr, query, newFreq);
+    public ParkingLotSystem(int capacity) {
+        this.capacity = capacity;
+        this.lot = new ParkingSpot[capacity];
+        for (int i = 0; i < capacity; i++) {
+            lot[i] = new ParkingSpot();
         }
     }
 
-    private void updateTopTen(TrieNode node, String query, int freq) {
-        // Remove the query if it already exists in the top ten (to update its freq)
-        node.topTen.removeIf(info -> info.query.equals(query));
-
-        // Add the updated info
-        node.topTen.add(new QueryInfo(query, freq));
-
-        // Sort and prune to keep only Top 10
-        Collections.sort(node.topTen);
-        if (node.topTen.size() > 10) {
-            node.topTen.remove(node.topTen.size() - 1);
-        }
+    // Custom Hash Function
+    private int hash(String licensePlate) {
+        return Math.abs(licensePlate.hashCode()) % capacity;
     }
 
     /**
-     * Returns top 10 suggestions for a prefix.
-     * Time Complexity: O(L) where L is prefix length.
+     * Assigns a spot using Linear Probing: (hash + i) % capacity
      */
-    public List<String> search(String prefix) {
-        TrieNode curr = root;
-        for (char c : prefix.toCharArray()) {
-            if (!curr.children.containsKey(c)) {
-                return Collections.emptyList();
+    public String parkVehicle(String licensePlate) {
+        if (occupiedCount >= capacity) return "Lot Full!";
+
+        int preferredSpot = hash(licensePlate);
+        int probes = 0;
+        int currentSpot = preferredSpot;
+
+        // Linear Probing
+        while (lot[currentSpot].status == SpotStatus.OCCUPIED) {
+            currentSpot = (currentSpot + 1) % capacity;
+            probes++;
+        }
+
+        // Park the vehicle
+        lot[currentSpot].vehicle = new Vehicle(licensePlate);
+        lot[currentSpot].status = SpotStatus.OCCUPIED;
+        occupiedCount++;
+        totalProbes += probes;
+        totalParkings++;
+
+        return String.format("Vehicle [%s] parked at spot #%d (%d probes)",
+                licensePlate, currentSpot, probes);
+    }
+
+    /**
+     * Removes vehicle and calculates billing
+     */
+    public String exitVehicle(String licensePlate) {
+        int preferredSpot = hash(licensePlate);
+        int currentSpot = preferredSpot;
+        int checked = 0;
+
+        // Search for the vehicle
+        while (checked < capacity) {
+            if (lot[currentSpot].status == SpotStatus.EMPTY) break; // Stop if we hit an actual empty spot
+
+            if (lot[currentSpot].status == SpotStatus.OCCUPIED &&
+                    lot[currentSpot].vehicle.licensePlate.equals(licensePlate)) {
+
+                Vehicle v = lot[currentSpot].vehicle;
+                Duration duration = Duration.between(v.entryTime, LocalDateTime.now().plusHours(2)); // Mock 2h duration
+                double fee = calculateFee(duration);
+
+                // Lazy Deletion: Mark as DELETED so probing continues correctly for other vehicles
+                lot[currentSpot].status = SpotStatus.DELETED;
+                lot[currentSpot].vehicle = null;
+                occupiedCount--;
+
+                return String.format("Exit: %s | Duration: %dh %dm | Fee: $%.2f",
+                        licensePlate, duration.toHours(), duration.toMinutesPart(), fee);
             }
-            curr = curr.children.get(c);
+            currentSpot = (currentSpot + 1) % capacity;
+            checked++;
         }
+        return "Vehicle not found.";
+    }
 
-        List<String> results = new ArrayList<>();
-        for (QueryInfo info : curr.topTen) {
-            results.add(info.query);
-        }
-        return results;
+    private double calculateFee(Duration duration) {
+        return Math.max(5.0, duration.toHours() * 5.50); // $5 minimum, $5.50/hr
+    }
+
+    public void printStats() {
+        double occupancy = (double) occupiedCount / capacity * 100;
+        double avgProbes = totalParkings == 0 ? 0 : (double) totalProbes / totalParkings;
+        System.out.println("\n--- Parking Statistics ---");
+        System.out.printf("Occupancy: %.1f%%\n", occupancy);
+        System.out.printf("Average Probes: %.2f\n", avgProbes);
+        System.out.println("--------------------------\n");
     }
 
     public static void main(String[] args) {
-        Assignment01and02 ac = new AutocompleteSystem();
+        ParkingLotSystem mallParking = new ParkingLotSystem(500);
 
-        ac.updateFrequency("java tutorial", 1234567);
-        ac.updateFrequency("javascript", 987654);
-        ac.updateFrequency("java download", 456789);
+        // Simulate simultaneous arrivals (potential collisions)
+        System.out.println(mallParking.parkVehicle("ABC-1234"));
+        System.out.println(mallParking.parkVehicle("ABC-1235")); // Likely to hash close/same
+        System.out.println(mallParking.parkVehicle("XYZ-9999"));
 
-        System.out.println("Search 'jav': " + ac.search("jav"));
+        mallParking.printStats();
 
-        // Trending update
-        ac.updateFrequency("java 21 features", 2000000);
-        System.out.println("Search 'jav' after trend: " + ac.search("jav"));
+        System.out.println(mallParking.exitVehicle("ABC-1234"));
     }
 }
