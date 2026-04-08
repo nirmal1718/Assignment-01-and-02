@@ -1,102 +1,131 @@
 import java.util.*;
-import java.util.stream.Collectors;
 
-class Transaction {
-    int id;
-    double amount;
-    String merchant;
-    long timestamp; // epoch seconds
-    String accountId;
+class VideoData {
+    String videoId;
+    String content;
 
-    public Transaction(int id, double amount, String merchant, long timestamp, String accountId) {
-        this.id = id;
-        this.amount = amount;
-        this.merchant = merchant;
-        this.timestamp = timestamp;
-        this.accountId = accountId;
+    public VideoData(String videoId, String content) {
+        this.videoId = videoId;
+        this.content = content;
     }
 }
 
-public class Assignment01and02 {
+public class MultiLevelCacheSystem {
+    // Configuration Constants
+    private final int L1_CAPACITY = 10000;
+    private final int L2_CAPACITY = 100000;
+    private final int PROMOTION_THRESHOLD = 3;
 
-    // 1. Classic Two-Sum: O(n)
-    public List<String> findTwoSum(List<Transaction> transactions, double target) {
-        Map<Double, Transaction> seen = new HashMap<>();
-        List<String> pairs = new ArrayList<>();
+    // Cache Tiers
+    private final LinkedHashMap<String, VideoData> l1Cache; // In-memory
+    private final LinkedHashMap<String, String> l2Cache;    // SSD-backed (Mapping ID to FilePath)
+    private final Map<String, Integer> accessTracker;       // Tracks frequency for promotion
 
-        for (Transaction t : transactions) {
-            double complement = target - t.amount;
-            if (seen.containsKey(complement)) {
-                pairs.add("(" + seen.get(complement).id + ", " + t.id + ")");
+    // Metrics
+    private double l1Hits = 0, l2Hits = 0, l3Hits = 0, totalRequests = 0;
+
+    public MultiLevelCacheSystem() {
+        // LinkedHashMap with accessOrder = true for LRU eviction
+        this.l1Cache = new LinkedHashMap<>(L1_CAPACITY, 0.75f, true) {
+            protected boolean removeEldestEntry(Map.Entry eldest) {
+                return size() > L1_CAPACITY;
             }
-            seen.put(t.amount, t);
-        }
-        return pairs;
+        };
+
+        this.l2Cache = new LinkedHashMap<>(L2_CAPACITY, 0.75f, true) {
+            protected boolean removeEldestEntry(Map.Entry eldest) {
+                return size() > L2_CAPACITY;
+            }
+        };
+
+        this.accessTracker = new HashMap<>();
     }
 
-    // 2. Two-Sum with 1-Hour Window: O(n)
-    public List<String> findTwoSumWithWindow(List<Transaction> transactions, double target) {
-        // Map amount to a list of transactions (since multiple tx can have same amount)
-        Map<Double, List<Transaction>> map = new HashMap<>();
-        List<String> results = new ArrayList<>();
-        long oneHourInSec = 3600;
+    public VideoData getVideo(String videoId) {
+        totalRequests++;
 
-        for (Transaction t1 : transactions) {
-            double complement = target - t1.amount;
-            if (map.containsKey(complement)) {
-                for (Transaction t2 : map.get(complement)) {
-                    if (Math.abs(t1.timestamp - t2.timestamp) <= oneHourInSec) {
-                        results.add("Match: " + t1.id + " & " + t2.id);
-                    }
-                }
-            }
-            map.computeIfAbsent(t1.amount, k -> new ArrayList<>()).add(t1);
+        // 1. Check L1 Cache (Memory)
+        if (l1Cache.containsKey(videoId)) {
+            l1Hits++;
+            System.out.println("-> L1 Cache HIT (0.5ms)");
+            return l1Cache.get(videoId);
         }
-        return results;
+
+        // 2. Check L2 Cache (SSD)
+        if (l2Cache.containsKey(videoId)) {
+            l2Hits++;
+            System.out.println("-> L1 Cache MISS (0.5ms)");
+            System.out.println("-> L2 Cache HIT (5ms)");
+
+            VideoData data = fetchFromSSD(videoId);
+            updateAccessAndPromote(videoId, data);
+            return data;
+        }
+
+        // 3. Check L3 (Database)
+        l3Hits++;
+        System.out.println("-> L1 Cache MISS");
+        System.out.println("-> L2 Cache MISS");
+        System.out.println("-> L3 Database HIT (150ms)");
+
+        VideoData data = fetchFromDatabase(videoId);
+
+        // New data always enters L2 first
+        l2Cache.put(videoId, "SSD_PATH_" + videoId);
+        accessTracker.put(videoId, 1);
+
+        return data;
     }
 
-    // 3. Duplicate Detection: Same amount/merchant, different account
-    public void detectDuplicates(List<Transaction> transactions) {
-        // Composite Key: "amount:merchant"
-        Map<String, List<Transaction>> groups = new HashMap<>();
+    private void updateAccessAndPromote(String videoId, VideoData data) {
+        int count = accessTracker.getOrDefault(videoId, 0) + 1;
+        accessTracker.put(videoId, count);
 
-        for (Transaction t : transactions) {
-            String key = t.amount + ":" + t.merchant;
-            groups.computeIfAbsent(key, k -> new ArrayList<>()).add(t);
+        // Promotion Logic: L2 -> L1
+        if (count >= PROMOTION_THRESHOLD) {
+            System.out.println("-> Promoted to L1");
+            l1Cache.put(videoId, data);
+            l2Cache.remove(videoId);
         }
-
-        groups.forEach((key, list) -> {
-            if (list.size() > 1) {
-                Set<String> accounts = list.stream().map(t -> t.accountId).collect(Collectors.toSet());
-                if (accounts.size() > 1) {
-                    System.out.println("Duplicate Alert for " + key + " across accounts: " + accounts);
-                }
-            }
-        });
     }
 
-    // 4. K-Sum: Recursive approach (Generic)
-    public void findKSum(List<Transaction> txs, int k, double target, int start, List<Transaction> current, List<List<Transaction>> results) {
-        if (k == 2) {
-            // Base case: use two-sum logic for efficiency
-            Map<Double, Transaction> map = new HashMap<>();
-            for (int i = start; i < txs.size(); i++) {
-                double complement = target - txs.get(i).amount;
-                if (map.containsKey(complement)) {
-                    List<Transaction> match = new ArrayList<>(current);
-                    match.add(map.get(complement));
-                    match.add(txs.get(i));
-                    results.add(match);
-                }
-                map.put(txs.get(i).amount, txs.get(i));
-            }
-            return;
-        }
+    private VideoData fetchFromSSD(String videoId) {
+        return new VideoData(videoId, "Content from SSD");
+    }
 
-        for (int i = start; i < txs.size() - k + 1; i++) {
-            current.add(txs.get(i));
-            findKSum(txs, k - 1, target - txs.get(i).amount, i + 1, current, results);
-            current.remove(current.size() - 1); // Backtrack
-        }
+    private VideoData fetchFromDatabase(String videoId) {
+        return new VideoData(videoId, "Content from DB");
+    }
+
+    public void invalidate(String videoId) {
+        l1Cache.remove(videoId);
+        l2Cache.remove(videoId);
+        accessTracker.remove(videoId);
+        System.out.println("Invalidated: " + videoId);
+    }
+
+    public void getStatistics() {
+        double avgTime = (l1Hits * 0.5 + l2Hits * 5.0 + l3Hits * 150.0) / totalRequests;
+        System.out.println("\n--- Cache Statistics ---");
+        System.out.printf("L1 Hit Rate: %.1f%%\n", (l1Hits / totalRequests) * 100);
+        System.out.printf("L2 Hit Rate: %.1f%%\n", (l2Hits / totalRequests) * 100);
+        System.out.printf("L3 Hit Rate: %.1f%%\n", (l3Hits / totalRequests) * 100);
+        System.out.printf("Overall Avg Latency: %.2fms\n", avgTime);
+    }
+
+    public static void main(String[] args) {
+        MultiLevelCacheSystem netflixCache = new MultiLevelCacheSystem();
+
+        // Scenario 1: First access (DB Hit)
+        netflixCache.getVideo("video_123");
+
+        // Scenario 2: Multiple accesses to trigger promotion
+        netflixCache.getVideo("video_123"); // Hit L2
+        netflixCache.getVideo("video_123"); // Hit L2 -> Promotes to L1
+
+        // Scenario 3: Accessing promoted video
+        netflixCache.getVideo("video_123"); // Hit L1
+
+        netflixCache.getStatistics();
     }
 }
