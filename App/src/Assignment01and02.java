@@ -1,133 +1,82 @@
 import java.util.*;
-import java.util.concurrent.*;
-import java.util.concurrent.locks.ReentrantLock;
-
-class DNSEntry {
-    String domain;
-    String ipAddress;
-    long expiryTime; // System.currentTimeMillis() + TTL
-
-    DNSEntry(String domain, String ipAddress, long ttlSeconds) {
-        this.domain = domain;
-        this.ipAddress = ipAddress;
-        this.expiryTime = System.currentTimeMillis() + (ttlSeconds * 1000);
-    }
-
-    boolean isExpired() {
-        return System.currentTimeMillis() > expiryTime;
-    }
-}
 
 public class Assignment01and02 {
-    private final int capacity;
-    private final Map<String, DNSEntry> cache;
-    private final LinkedList<String> lruOrder;
-    private final ReentrantLock lock = new ReentrantLock();
+    // Maps an n-gram to a set of Document IDs that contain it
+    private final Map<String, Set<String>> ngramIndex = new HashMap<>();
+    // Stores the total n-gram count for each document to calculate percentage
+    private final Map<String, Integer> documentSizeMap = new HashMap<>();
+    private final int N = 5; // Using 5-grams as suggested
 
-    // Metrics
-    private long hits = 0;
-    private long misses = 0;
-    private long totalLookupTimeNs = 0;
+    /**
+     * Indexes a document into the system.
+     */
+    public void indexDocument(String docId, String content) {
+        List<String> ngrams = extractNgrams(content);
+        documentSizeMap.put(docId, ngrams.size());
 
-    public DNSCache(int capacity) {
-        this.capacity = capacity;
-        this.cache = new HashMap<>();
-        this.lruOrder = new LinkedList<>();
-
-        // Background thread to clean expired entries every 10 seconds
-        ScheduledExecutorService cleaner = Executors.newSingleThreadScheduledExecutor();
-        cleaner.scheduleAtFixedRate(this::cleanupExpired, 10, 10, TimeUnit.SECONDS);
+        for (String gram : ngrams) {
+            ngramIndex.computeIfAbsent(gram, k -> new HashSet<>()).add(docId);
+        }
     }
 
-    public String resolve(String domain) {
-        long startTime = System.nanoTime();
-        lock.lock();
-        try {
-            if (cache.containsKey(domain)) {
-                DNSEntry entry = cache.get(domain);
+    /**
+     * Analyzes a new document against the indexed database.
+     */
+    public void analyzeDocument(String newDocContent) {
+        List<String> newNgrams = extractNgrams(newDocContent);
+        int totalNgrams = newNgrams.size();
 
-                if (!entry.isExpired()) {
-                    // Cache HIT
-                    hits++;
-                    updateLRU(domain);
-                    recordTime(startTime);
-                    System.out.println("resolve(\"" + domain + "\") -> Cache HIT -> " + entry.ipAddress);
-                    return entry.ipAddress;
-                } else {
-                    // Cache EXPIRED
-                    System.out.print("resolve(\"" + domain + "\") -> Cache EXPIRED -> ");
-                    removeEntry(domain);
+        // Count matches per existing document
+        Map<String, Integer> matchCounts = new HashMap<>();
+
+        for (String gram : newNgrams) {
+            if (ngramIndex.containsKey(gram)) {
+                for (String existingDocId : ngramIndex.get(gram)) {
+                    matchCounts.put(existingDocId, matchCounts.getOrDefault(existingDocId, 0) + 1);
                 }
-            } else {
-                // Cache MISS
-                System.out.print("resolve(\"" + domain + "\") -> Cache MISS -> ");
             }
+        }
 
-            // Simulate Upstream Query (100ms delay)
-            misses++;
-            String ip = queryUpstream(domain);
-            put(domain, ip, 300); // Default 300s TTL
-            recordTime(startTime);
-            System.out.println("Query upstream -> " + ip);
-            return ip;
+        System.out.println("Extracted " + totalNgrams + " n-grams");
 
-        } finally {
-            lock.unlock();
+        // Calculate and report similarity
+        for (Map.Entry<String, Integer> entry : matchCounts.entrySet()) {
+            String docId = entry.getKey();
+            int matches = entry.getValue();
+            double similarity = (matches / (double) totalNgrams) * 100;
+
+            String status = similarity > 50 ? "PLAGIARISM DETECTED" : (similarity > 10 ? "suspicious" : "clean");
+            System.out.printf("→ Found %d matching n-grams with \"%s\"\n", matches, docId);
+            System.out.printf("→ Similarity: %.1f%% (%s)\n", similarity, status);
         }
     }
 
-    private void put(String domain, String ip, long ttl) {
-        if (cache.size() >= capacity) {
-            String oldest = lruOrder.removeLast();
-            cache.remove(oldest);
+    /**
+     * Helper to break text into sequences of N words.
+     */
+    private List<String> extractNgrams(String text) {
+        String[] words = text.toLowerCase().replaceAll("[^a-zA-Z ]", "").split("\\s+");
+        List<String> ngrams = new ArrayList<>();
+
+        for (int i = 0; i <= words.length - N; i++) {
+            StringBuilder sb = new StringBuilder();
+            for (int j = 0; j < N; j++) {
+                sb.append(words[i + j]).append(j < N - 1 ? " " : "");
+            }
+            ngrams.add(sb.toString());
         }
-        DNSEntry newEntry = new DNSEntry(domain, ip, ttl);
-        cache.put(domain, newEntry);
-        lruOrder.addFirst(domain);
+        return ngrams;
     }
 
-    private void updateLRU(String domain) {
-        lruOrder.remove(domain);
-        lruOrder.addFirst(domain);
-    }
+    public static void main(String[] args) {
+        PlagiarismDetector detector = new PlagiarismDetector();
 
-    private void removeEntry(String domain) {
-        cache.remove(domain);
-        lruOrder.remove(domain);
-    }
+        // Indexing some sample "database" documents
+        detector.indexDocument("essay_089.txt", "the quick brown fox jumps over the lazy dog often");
+        detector.indexDocument("essay_092.txt", "the quick brown fox jumps over a very sleepy dog tonight");
 
-    private String queryUpstream(String domain) {
-        // Mock upstream DNS resolution
-        try { Thread.sleep(100); } catch (InterruptedException e) {}
-        return "172.217.14." + (new Random().nextInt(255));
-    }
-
-    private void recordTime(long startNs) {
-        totalLookupTimeNs += (System.nanoTime() - startNs);
-    }
-
-    public void cleanupExpired() {
-        lock.lock();
-        try {
-            cache.entrySet().removeIf(entry -> entry.getValue().isExpired());
-            lruOrder.removeIf(domain -> !cache.containsKey(domain));
-        } finally {
-            lock.unlock();
-        }
-    }
-
-    public void getCacheStats() {
-        double hitRate = (hits + misses == 0) ? 0 : (double) hits / (hits + misses) * 100;
-        double avgTimeMs = (hits + misses == 0) ? 0 : (totalLookupTimeNs / 1_000_000.0) / (hits + misses);
-        System.out.printf("Stats -> Hit Rate: %.1f%%, Avg Lookup Time: %.2fms%n", hitRate, avgTimeMs);
-    }
-
-    public static void main(String[] args) throws InterruptedException {
-        DNSCache dns = new DNSCache(5);
-
-        dns.resolve("google.com"); // Miss
-        dns.resolve("google.com"); // Hit
-        dns.resolve("openai.com"); // Miss
-        dns.getCacheStats();
+        // Analyzing a new submission
+        String newSubmission = "the quick brown fox jumps over the lazy dog and runs away";
+        detector.analyzeDocument(newSubmission);
     }
 }
