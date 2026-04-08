@@ -1,80 +1,79 @@
-import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 public class Assignment01and02 {
-    // Thread-safe maps for high concurrency (1000+ checks/sec)
-    private final Map<String, Integer> userDatabase = new ConcurrentHashMap<>();
-    private final Map<String, AtomicInteger> attemptTracker = new ConcurrentHashMap<>();
+    // Stores Product ID -> Current Stock
+    private final ConcurrentHashMap<String, AtomicInteger> inventory = new ConcurrentHashMap<>();
 
-    // FIX: Constructor must match the class name "Assignment01and02"
-    public Assignment01and02() {
-        // Pre-populating some data for the scenario
-        userDatabase.put("john_doe", 101);
-        userDatabase.put("alex_pro", 102);
+    // Stores Product ID -> Queue of User IDs (FIFO Waiting List)
+    private final ConcurrentHashMap<String, ConcurrentLinkedQueue<Long>> waitingLists = new ConcurrentHashMap<>();
+
+    /**
+     * Initializes a product in the system.
+     */
+    public void addProduct(String productId, int initialStock) {
+        inventory.put(productId, new AtomicInteger(initialStock));
+        waitingLists.put(productId, new ConcurrentLinkedQueue<>());
     }
 
     /**
-     * Checks availability in O(1) time.
+     * Checks current stock in O(1)
      */
-    public boolean checkAvailability(String username) {
-        String normalized = username.toLowerCase(); // Ensure case-insensitivity
-
-        // Increment attempt counter
-        attemptTracker.computeIfAbsent(normalized, k -> new AtomicInteger(0))
-                .incrementAndGet();
-
-        // Key-value mapping lookup
-        return !userDatabase.containsKey(normalized);
+    public int checkStock(String productId) {
+        AtomicInteger stock = inventory.get(productId);
+        return (stock != null) ? stock.get() : 0;
     }
 
     /**
-     * Suggests alternatives by appending numbers or modifying characters.
+     * Processes purchase with atomic operations to prevent overselling.
      */
-    public List<String> suggestAlternatives(String username) {
-        List<String> suggestions = new ArrayList<>();
-        int suffix = 1;
+    public String purchaseItem(String productId, long userId) {
+        AtomicInteger stock = inventory.get(productId);
 
-        while (suggestions.size() < 3) {
-            String candidate = username + suffix;
-            if (!userDatabase.containsKey(candidate.toLowerCase())) {
-                suggestions.add(candidate);
+        if (stock == null) return "Product not found.";
+
+        // Atomic decrement and get: equivalent to check-and-set in one CPU cycle
+        // We only proceed if the value was > 0 before decrementing
+        while (true) {
+            int currentStock = stock.get();
+            if (currentStock <= 0) {
+                addToWaitingList(productId, userId);
+                int position = getWaitingListPosition(productId, userId);
+                return "Added to waiting list, position #" + position;
             }
-            suffix++;
-        }
 
-        // Logic to add a dot variation
-        if (username.length() > 1) {
-            String dotVariation = username.substring(0, 1) + "." + username.substring(1);
-            if (!userDatabase.containsKey(dotVariation.toLowerCase())) {
-                suggestions.add(dotVariation);
+            // compareAndSet ensures no other thread changed the stock between our get() and set()
+            if (stock.compareAndSet(currentStock, currentStock - 1)) {
+                return "Success, " + (currentStock - 1) + " units remaining";
             }
         }
-
-        return suggestions;
     }
 
-    /**
-     * Returns the most frequently attempted username.
-     */
-    public String getMostAttempted() {
-        return attemptTracker.entrySet().stream()
-                .max(Comparator.comparingInt(e -> e.getValue().get()))
-                .map(Map.Entry::getKey)
-                .orElse("None");
+    private void addToWaitingList(String productId, long userId) {
+        ConcurrentLinkedQueue<Long> queue = waitingLists.get(productId);
+        if (!queue.contains(userId)) {
+            queue.add(userId);
+        }
+    }
+
+    private int getWaitingListPosition(String productId, long userId) {
+        ConcurrentLinkedQueue<Long> queue = waitingLists.get(productId);
+        int pos = 1;
+        for (Long id : queue) {
+            if (id == userId) return pos;
+            pos++;
+        }
+        return pos;
     }
 
     public static void main(String[] args) {
-        // FIX: Instantiate the correct class name
-        Assignment01and02 sys = new Assignment01and02();
+        FlashSaleManager manager = new FlashSaleManager();
+        String product = "IPHONE15_256GB";
+        manager.addProduct(product, 2); // Small stock for demo
 
-        System.out.println("Is 'john_doe' available? " + sys.checkAvailability("john_doe"));
-        System.out.println("Is 'jane_smith' available? " + sys.checkAvailability("jane_smith"));
-
-        if (!sys.checkAvailability("john_doe")) {
-            System.out.println("Suggestions for 'john_doe': " + sys.suggestAlternatives("john_doe"));
-        }
-
-        System.out.println("Most attempted: " + sys.getMostAttempted());
+        System.out.println(manager.purchaseItem(product, 12345)); // Success
+        System.out.println(manager.purchaseItem(product, 67890)); // Success
+        System.out.println(manager.purchaseItem(product, 99999)); // Waiting List
     }
 }
