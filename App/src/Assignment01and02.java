@@ -1,64 +1,86 @@
-import java.util.*;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.LongAdder;
-import java.util.stream.Collectors;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
+import java.time.Instant;
 
-public class Assignment01and02 {
-    // 1. Page View Counts: Use LongAdder for high throughput
-    private final ConcurrentHashMap<String, LongAdder> pageViews = new ConcurrentHashMap<>();
+public class assignment01and02 {
 
-    // 2. Unique Visitors: Use ConcurrentHashMap-backed Sets
-    private final ConcurrentHashMap<String, Set<String>> uniqueVisitors = new ConcurrentHashMap<>();
-
-    // 3. Traffic Sources
-    private final ConcurrentHashMap<String, LongAdder> trafficSources = new ConcurrentHashMap<>();
+    private final Map<String, TokenBucket> clientBuckets = new ConcurrentHashMap<>();
+    private static final long MAX_LIMIT = 1000;
+    private static final long REFILL_INTERVAL_SEC = 3600; // 1 hour
 
     /**
-     * Processes an incoming event in O(1) time.
+     * Internal class representing a client's bucket state.
+     * Uses atomic operations to ensure thread safety under high concurrency.
      */
-    public void processEvent(String url, String userId, String source) {
-        // Increment page views
-        pageViews.computeIfAbsent(url, k -> new LongAdder()).increment();
+    class TokenBucket {
+        final long capacity;
+        final AtomicLong tokens;
+        final AtomicLong lastRefillTimestamp;
 
-        // Track unique visitors
-        uniqueVisitors.computeIfAbsent(url, k -> ConcurrentHashMap.newKeySet()).add(userId);
+        TokenBucket(long capacity) {
+            this.capacity = capacity;
+            this.tokens = new AtomicLong(capacity);
+            this.lastRefillTimestamp = new AtomicLong(Instant.now().getEpochSecond());
+        }
 
-        // Increment source counts
-        trafficSources.computeIfAbsent(source, k -> new LongAdder()).increment();
+        public synchronized boolean tryConsume() {
+            refill();
+            if (tokens.get() > 0) {
+                tokens.decrementAndGet();
+                return true;
+            }
+            return false;
+        }
+
+        private void refill() {
+            long now = Instant.now().getEpochSecond();
+            long lastRefill = lastRefillTimestamp.get();
+
+            if (now > lastRefill) {
+                // If the reset interval (1 hour) has passed, reset tokens to full
+                if (now - lastRefill >= REFILL_INTERVAL_SEC) {
+                    tokens.set(capacity);
+                    lastRefillTimestamp.set(now);
+                }
+            }
+        }
     }
 
     /**
-     * Gets the Top 10 Pages.
-     * Time Complexity: O(P log K) where P is total pages and K is 10.
+     * Primary check for API access
      */
-    public List<PageStats> getTopPages(int n) {
-        return pageViews.entrySet().stream()
-                .map(entry -> new PageStats(
-                        entry.getKey(),
-                        entry.getValue().sum(),
-                        uniqueVisitors.getOrDefault(entry.getKey(), Collections.emptySet()).size()
-                ))
-                // Min-Heap logic via stream sorting for simplicity
-                .sorted(Comparator.comparingLong(PageStats::getViews).reversed())
-                .limit(n)
-                .collect(Collectors.toList());
+    public String checkRateLimit(String clientId) {
+        TokenBucket bucket = clientBuckets.computeIfAbsent(clientId, k -> new TokenBucket(MAX_LIMIT));
+
+        if (bucket.tryConsume()) {
+            return String.format("Allowed (%d requests remaining)", bucket.tokens.get());
+        } else {
+            long nextReset = bucket.lastRefillTimestamp.get() + REFILL_INTERVAL_SEC;
+            long retryAfter = nextReset - Instant.now().getEpochSecond();
+            return String.format("Denied (0 requests remaining, retry after %ds)", Math.max(0, retryAfter));
+        }
     }
 
-    // Helper class for Dashboard reporting
-    static class PageStats {
-        String url;
-        long views;
-        int uniqueViews;
+    /**
+     * Returns the current status of a client's limit
+     */
+    public String getRateLimitStatus(String clientId) {
+        TokenBucket bucket = clientBuckets.get(clientId);
+        if (bucket == null) return "Client not initialized.";
 
-        PageStats(String url, long views, int unique) {
-            this.url = url; this.views = views; this.uniqueViews = unique;
-        }
+        long used = MAX_LIMIT - bucket.tokens.get();
+        long resetAt = bucket.lastRefillTimestamp.get() + REFILL_INTERVAL_SEC;
 
-        public long getViews() { return views; }
+        return String.format("{used: %d, limit: %d, reset: %d}", used, MAX_LIMIT, resetAt);
+    }
 
-        @Override
-        public String toString() {
-            return String.format("%s - %d views (%d unique)", url, views, uniqueViews);
-        }
+    public static void main(String[] args) {
+        RateLimiterManager limiter = new RateLimiterManager();
+
+        // Example Usage
+        System.out.println(limiter.checkRateLimit("abc123")); // Allowed (999 remaining)
+        System.out.println(limiter.checkRateLimit("abc123")); // Allowed (998 remaining)
+        System.out.println(limiter.getRateLimitStatus("abc123"));
     }
 }
