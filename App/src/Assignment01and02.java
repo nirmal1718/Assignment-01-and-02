@@ -1,126 +1,102 @@
 import java.util.*;
-import java.time.*;
+import java.util.stream.Collectors;
 
-enum SpotStatus { EMPTY, OCCUPIED, DELETED }
+class Transaction {
+    int id;
+    double amount;
+    String merchant;
+    long timestamp; // epoch seconds
+    String accountId;
 
-class Vehicle {
-    String licensePlate;
-    LocalDateTime entryTime;
-
-    Vehicle(String licensePlate) {
-        this.licensePlate = licensePlate;
-        this.entryTime = LocalDateTime.now();
+    public Transaction(int id, double amount, String merchant, long timestamp, String accountId) {
+        this.id = id;
+        this.amount = amount;
+        this.merchant = merchant;
+        this.timestamp = timestamp;
+        this.accountId = accountId;
     }
 }
 
-class ParkingSpot {
-    Vehicle vehicle;
-    SpotStatus status = SpotStatus.EMPTY;
-}
+public class Assignment01and02 {
 
-public class ParkingLotSystem {
-    private final int capacity;
-    private final ParkingSpot[] lot;
-    private int occupiedCount = 0;
-    private int totalProbes = 0;
-    private int totalParkings = 0;
+    // 1. Classic Two-Sum: O(n)
+    public List<String> findTwoSum(List<Transaction> transactions, double target) {
+        Map<Double, Transaction> seen = new HashMap<>();
+        List<String> pairs = new ArrayList<>();
 
-    public ParkingLotSystem(int capacity) {
-        this.capacity = capacity;
-        this.lot = new ParkingSpot[capacity];
-        for (int i = 0; i < capacity; i++) {
-            lot[i] = new ParkingSpot();
-        }
-    }
-
-    // Custom Hash Function
-    private int hash(String licensePlate) {
-        return Math.abs(licensePlate.hashCode()) % capacity;
-    }
-
-    /**
-     * Assigns a spot using Linear Probing: (hash + i) % capacity
-     */
-    public String parkVehicle(String licensePlate) {
-        if (occupiedCount >= capacity) return "Lot Full!";
-
-        int preferredSpot = hash(licensePlate);
-        int probes = 0;
-        int currentSpot = preferredSpot;
-
-        // Linear Probing
-        while (lot[currentSpot].status == SpotStatus.OCCUPIED) {
-            currentSpot = (currentSpot + 1) % capacity;
-            probes++;
-        }
-
-        // Park the vehicle
-        lot[currentSpot].vehicle = new Vehicle(licensePlate);
-        lot[currentSpot].status = SpotStatus.OCCUPIED;
-        occupiedCount++;
-        totalProbes += probes;
-        totalParkings++;
-
-        return String.format("Vehicle [%s] parked at spot #%d (%d probes)",
-                licensePlate, currentSpot, probes);
-    }
-
-    /**
-     * Removes vehicle and calculates billing
-     */
-    public String exitVehicle(String licensePlate) {
-        int preferredSpot = hash(licensePlate);
-        int currentSpot = preferredSpot;
-        int checked = 0;
-
-        // Search for the vehicle
-        while (checked < capacity) {
-            if (lot[currentSpot].status == SpotStatus.EMPTY) break; // Stop if we hit an actual empty spot
-
-            if (lot[currentSpot].status == SpotStatus.OCCUPIED &&
-                    lot[currentSpot].vehicle.licensePlate.equals(licensePlate)) {
-
-                Vehicle v = lot[currentSpot].vehicle;
-                Duration duration = Duration.between(v.entryTime, LocalDateTime.now().plusHours(2)); // Mock 2h duration
-                double fee = calculateFee(duration);
-
-                // Lazy Deletion: Mark as DELETED so probing continues correctly for other vehicles
-                lot[currentSpot].status = SpotStatus.DELETED;
-                lot[currentSpot].vehicle = null;
-                occupiedCount--;
-
-                return String.format("Exit: %s | Duration: %dh %dm | Fee: $%.2f",
-                        licensePlate, duration.toHours(), duration.toMinutesPart(), fee);
+        for (Transaction t : transactions) {
+            double complement = target - t.amount;
+            if (seen.containsKey(complement)) {
+                pairs.add("(" + seen.get(complement).id + ", " + t.id + ")");
             }
-            currentSpot = (currentSpot + 1) % capacity;
-            checked++;
+            seen.put(t.amount, t);
         }
-        return "Vehicle not found.";
+        return pairs;
     }
 
-    private double calculateFee(Duration duration) {
-        return Math.max(5.0, duration.toHours() * 5.50); // $5 minimum, $5.50/hr
+    // 2. Two-Sum with 1-Hour Window: O(n)
+    public List<String> findTwoSumWithWindow(List<Transaction> transactions, double target) {
+        // Map amount to a list of transactions (since multiple tx can have same amount)
+        Map<Double, List<Transaction>> map = new HashMap<>();
+        List<String> results = new ArrayList<>();
+        long oneHourInSec = 3600;
+
+        for (Transaction t1 : transactions) {
+            double complement = target - t1.amount;
+            if (map.containsKey(complement)) {
+                for (Transaction t2 : map.get(complement)) {
+                    if (Math.abs(t1.timestamp - t2.timestamp) <= oneHourInSec) {
+                        results.add("Match: " + t1.id + " & " + t2.id);
+                    }
+                }
+            }
+            map.computeIfAbsent(t1.amount, k -> new ArrayList<>()).add(t1);
+        }
+        return results;
     }
 
-    public void printStats() {
-        double occupancy = (double) occupiedCount / capacity * 100;
-        double avgProbes = totalParkings == 0 ? 0 : (double) totalProbes / totalParkings;
-        System.out.println("\n--- Parking Statistics ---");
-        System.out.printf("Occupancy: %.1f%%\n", occupancy);
-        System.out.printf("Average Probes: %.2f\n", avgProbes);
-        System.out.println("--------------------------\n");
+    // 3. Duplicate Detection: Same amount/merchant, different account
+    public void detectDuplicates(List<Transaction> transactions) {
+        // Composite Key: "amount:merchant"
+        Map<String, List<Transaction>> groups = new HashMap<>();
+
+        for (Transaction t : transactions) {
+            String key = t.amount + ":" + t.merchant;
+            groups.computeIfAbsent(key, k -> new ArrayList<>()).add(t);
+        }
+
+        groups.forEach((key, list) -> {
+            if (list.size() > 1) {
+                Set<String> accounts = list.stream().map(t -> t.accountId).collect(Collectors.toSet());
+                if (accounts.size() > 1) {
+                    System.out.println("Duplicate Alert for " + key + " across accounts: " + accounts);
+                }
+            }
+        });
     }
 
-    public static void main(String[] args) {
-        ParkingLotSystem mallParking = new ParkingLotSystem(500);
+    // 4. K-Sum: Recursive approach (Generic)
+    public void findKSum(List<Transaction> txs, int k, double target, int start, List<Transaction> current, List<List<Transaction>> results) {
+        if (k == 2) {
+            // Base case: use two-sum logic for efficiency
+            Map<Double, Transaction> map = new HashMap<>();
+            for (int i = start; i < txs.size(); i++) {
+                double complement = target - txs.get(i).amount;
+                if (map.containsKey(complement)) {
+                    List<Transaction> match = new ArrayList<>(current);
+                    match.add(map.get(complement));
+                    match.add(txs.get(i));
+                    results.add(match);
+                }
+                map.put(txs.get(i).amount, txs.get(i));
+            }
+            return;
+        }
 
-        // Simulate simultaneous arrivals (potential collisions)
-        System.out.println(mallParking.parkVehicle("ABC-1234"));
-        System.out.println(mallParking.parkVehicle("ABC-1235")); // Likely to hash close/same
-        System.out.println(mallParking.parkVehicle("XYZ-9999"));
-
-        mallParking.printStats();
-
-        System.out.println(mallParking.exitVehicle("ABC-1234"));
+        for (int i = start; i < txs.size() - k + 1; i++) {
+            current.add(txs.get(i));
+            findKSum(txs, k - 1, target - txs.get(i).amount, i + 1, current, results);
+            current.remove(current.size() - 1); // Backtrack
+        }
     }
 }
